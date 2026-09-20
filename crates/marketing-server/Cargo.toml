@@ -1,0 +1,24 @@
+[package]
+name = "marketing-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Axum and MongoDB foundation for email marketing automation."
+publish = false
+
+[dependencies]
+axum = { workspace = true }
+chrono = { workspace = true }
+clickhouse = { workspace = true }
+jsonwebtoken = { workspace = true }
+mongodb = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

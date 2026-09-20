@@ -49,8 +49,23 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 # Positional argument arrays and the module configuration blob.
 serde_json = "1"
+# HTTP routing and response extraction for the marketing automation API.
+axum = "0.8"
+# Tokio powers Axum, MongoDB, and outbound TinyFlows webhook delivery.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "signal"] }
+# Async MongoDB persistence for contacts, campaigns, and suppression state.
+mongodb = "3.2"
+# ISO-8601 timestamps stored with marketing records.
+chrono = { version = "0.4", features = ["serde"] }
+# HTTP client used by the TinyFlows webhook adapter.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Native ClickHouse client used for immutable engagement analytics events.
+clickhouse = "0.13"
+# Signed API session tokens issued after a verified Google OAuth identity.
+jsonwebtoken = "9"
+# URL encoding for Google OAuth authorization URLs.
+url = "2"
 # Module integration tests exercise the real asynchronous in-memory TinyBus.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 # Lints apply to every member that opts in with `[lints] workspace = true`, and
 # to every target of that member. CI runs clippy with `-D warnings`, so anything
