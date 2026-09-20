@@ -64,7 +64,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 # Native ClickHouse client used for immutable engagement analytics events.
 clickhouse = { version = "0.13", features = ["chrono"] }
 # Signed API session tokens issued after a verified Google OAuth identity.
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 # URL encoding for Google OAuth authorization URLs.
 url = "2"
 # Cryptographically random opaque unsubscribe and OAuth state tokens.
