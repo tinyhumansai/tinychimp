@@ -14,6 +14,7 @@ use chrono::Utc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
+use url::Url;
 
 use crate::{
     AnalyticsWriter, GoogleOAuth, MarketingRepository, TinyFlowsClient,
@@ -30,6 +31,8 @@ pub struct AppState {
     analytics: AnalyticsWriter,
     auth: GoogleOAuth,
     public_base_url: String,
+    dashboard_origin: HeaderValue,
+    public_origin: String,
 }
 
 impl AppState {
@@ -44,20 +47,30 @@ impl AppState {
         analytics: AnalyticsWriter,
         auth: GoogleOAuth,
         public_base_url: String,
+        dashboard_origin: String,
     ) -> Result<Self> {
+        let dashboard_origin = HeaderValue::from_str(&dashboard_origin)
+            .map_err(|error| crate::Error::Validation(error.to_string()))?;
+        let public_origin = Url::parse(&public_base_url)
+            .map_err(|_| {
+                crate::Error::Validation("PUBLIC_BASE_URL must be an absolute HTTP URL".into())
+            })?
+            .origin()
+            .ascii_serialization();
         Ok(Self {
             repository: MarketingRepository::new(database).await?,
             workflows,
             analytics,
             auth,
             public_base_url,
+            dashboard_origin,
+            public_origin,
         })
     }
 }
 
 /// Creates the application router.
 pub fn router(state: AppState) -> Router {
-    let dashboard_origin = HeaderValue::from_static("http://localhost:5173");
     let state = Arc::new(state);
     let protected_api = Router::new()
         .route("/api/contacts", post(create_contact))
@@ -78,7 +91,7 @@ pub fn router(state: AppState) -> Router {
         .merge(protected_api)
         .layer(
             CorsLayer::new()
-                .allow_origin(dashboard_origin)
+                .allow_origin(state.dashboard_origin.clone())
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers(Any),
         )
@@ -142,11 +155,13 @@ async fn launch_campaign(
             .analytics
             .record(&CampaignEvent {
                 event_name: "campaign_launched".into(),
-                campaign_id: id,
+                campaign_id: id.clone(),
                 contact_id: String::new(),
                 occurred_at: Utc::now(),
             })
             .await?;
+        let campaign = state.repository.complete_campaign_launch(&id).await?;
+        return Ok(Json(campaign));
     }
     Ok(Json(outcome.campaign))
 }
@@ -156,7 +171,7 @@ async fn google_login(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
     login_response(&state.auth, &oauth_state)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct CallbackQuery {
     code: String,
     state: String,
@@ -217,16 +232,28 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         })
 }
 
-async fn unsubscribe_page() -> Html<&'static str> {
-    Html(
-        "<!doctype html><title>Unsubscribe</title><main><h1>Unsubscribe from email</h1><p>Use the form in the message to stop marketing email.</p></main>",
-    )
+async fn unsubscribe_page(Path(token): Path<String>) -> Result<Html<String>> {
+    if !is_unsubscribe_token(&token) {
+        return Err(crate::Error::Validation(
+            "unsubscribe link is invalid".into(),
+        ));
+    }
+    let action_token = html_attribute_escape(&token);
+    Ok(Html(format!(
+        "<!doctype html><title>Unsubscribe</title><main><h1>Unsubscribe from email</h1><form method=\"post\" action=\"/unsubscribe/{action_token}\"><button type=\"submit\">Unsubscribe</button></form></main>"
+    )))
 }
 
 async fn unsubscribe(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(token): Path<String>,
 ) -> Result<Html<&'static str>> {
+    if !has_public_origin(&headers, &state.public_origin) {
+        return Err(crate::Error::Validation(
+            "unsubscribe request has an invalid origin".into(),
+        ));
+    }
     let contact = state.repository.unsubscribe(&token).await?;
     state
         .workflows
@@ -248,13 +275,33 @@ async fn unsubscribe(
     ))
 }
 
+fn has_public_origin(headers: &HeaderMap, public_origin: &str) -> bool {
+    headers
+        .get(header::ORIGIN)
+        .and_then(|origin| origin.to_str().ok())
+        .is_some_and(|origin| origin == public_origin)
+}
+
+fn is_unsubscribe_token(token: &str) -> bool {
+    token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn html_attribute_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 impl fmt::Debug for AppState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("AppState").finish_non_exhaustive()
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct ContactResponse {
     email: String,
     subscribed: bool,

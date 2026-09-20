@@ -79,20 +79,19 @@ impl MarketingRepository {
         Ok(campaign)
     }
 
-    /// Marks a campaign as launched and reports whether this request changed its state.
+    /// Atomically claims a draft campaign for launch.
     ///
     /// # Errors
     ///
-    /// Returns not-found or database errors.
+    /// Returns a validation error when the campaign is not a draft, or a
+    /// not-found or database error.
     pub async fn launch_campaign(&self, id: &str) -> Result<LaunchOutcome> {
-        let id = ObjectId::parse_str(id)
-            .map_err(|_| Error::Validation("campaign id is invalid".into()))?;
-        let now = Utc::now();
+        let id = campaign_object_id(id)?;
         if let Some(campaign) = self
             .campaigns
             .find_one_and_update(
-                doc! { "_id": id, "status": { "$ne": "launched" } },
-                doc! { "$set": { "status": "launched", "launched_at": mongodb::bson::DateTime::from_millis(now.timestamp_millis()) } },
+                doc! { "_id": id, "status": "draft" },
+                doc! { "$set": { "status": "launching" } },
             )
             .return_document(mongodb::options::ReturnDocument::After)
             .await?
@@ -108,10 +107,41 @@ impl MarketingRepository {
             .find_one(doc! { "_id": id })
             .await?
             .ok_or_else(|| Error::NotFound("campaign not found".into()))?;
-        Ok(LaunchOutcome {
-            campaign,
-            newly_launched: false,
-        })
+        Err(Error::Validation(format!(
+            "campaign cannot be launched from {} state",
+            campaign_status_name(&campaign.status)
+        )))
+    }
+
+    /// Marks an already claimed campaign as launched after its handoff succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the campaign is not being launched, or
+    /// a not-found or database error.
+    pub async fn complete_campaign_launch(&self, id: &str) -> Result<Campaign> {
+        let id = campaign_object_id(id)?;
+        if let Some(campaign) = self
+            .campaigns
+            .find_one_and_update(
+                doc! { "_id": id, "status": "launching" },
+                doc! { "$set": { "status": "launched", "launched_at": mongodb::bson::DateTime::from_millis(Utc::now().timestamp_millis()) } },
+            )
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await?
+        {
+            return Ok(campaign);
+        }
+
+        let campaign = self
+            .campaigns
+            .find_one(doc! { "_id": id })
+            .await?
+            .ok_or_else(|| Error::NotFound("campaign not found".into()))?;
+        Err(Error::Validation(format!(
+            "campaign cannot complete launch from {} state",
+            campaign_status_name(&campaign.status)
+        )))
     }
 
     /// Removes a contact from marketing delivery by token.
@@ -131,6 +161,18 @@ fn inserted_object_id(inserted_id: &Bson) -> Result<ObjectId> {
             "MongoDB did not return an object id",
         ))
     })
+}
+
+fn campaign_object_id(id: &str) -> Result<ObjectId> {
+    ObjectId::parse_str(id).map_err(|_| Error::Validation("campaign id is invalid".into()))
+}
+
+fn campaign_status_name(status: &CampaignStatus) -> &'static str {
+    match status {
+        CampaignStatus::Draft => "draft",
+        CampaignStatus::Launching => "launching",
+        CampaignStatus::Launched => "launched",
+    }
 }
 
 fn new_contact(input: CreateContact, now: chrono::DateTime<Utc>) -> Result<Contact> {
@@ -222,8 +264,8 @@ mod test {
     };
 
     use super::{
-        MarketingRepository, UNSUBSCRIBE_PLACEHOLDER, inserted_object_id, new_campaign,
-        new_contact, normalize_email,
+        MarketingRepository, UNSUBSCRIBE_PLACEHOLDER, campaign_status_name, inserted_object_id,
+        new_campaign, new_contact, normalize_email,
     };
     use crate::{
         Error,
@@ -342,6 +384,16 @@ mod test {
         ));
     }
 
+    #[test]
+    fn names_every_campaign_lifecycle_state() {
+        assert_eq!(campaign_status_name(&CampaignStatus::Draft), "draft");
+        assert_eq!(
+            campaign_status_name(&CampaignStatus::Launching),
+            "launching"
+        );
+        assert_eq!(campaign_status_name(&CampaignStatus::Launched), "launched");
+    }
+
     #[tokio::test]
     async fn persists_contacts_campaigns_and_suppression_state()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -390,18 +442,35 @@ mod test {
             Err(Error::Validation(_))
         ));
         assert!(matches!(
+            repository.complete_campaign_launch("not-an-id").await,
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
             repository.launch_campaign(&ObjectId::new().to_hex()).await,
             Err(Error::NotFound(_))
         ));
 
-        let launched = repository.launch_campaign(&campaign_id).await?;
-        assert!(launched.newly_launched);
-        assert_eq!(launched.campaign.status, CampaignStatus::Launched);
-        assert!(launched.campaign.launched_at.is_some());
+        let launching = repository.launch_campaign(&campaign_id).await?;
+        assert!(launching.newly_launched);
+        assert_eq!(launching.campaign.status, CampaignStatus::Launching);
+        assert_eq!(launching.campaign.launched_at, None);
 
-        let repeated_launch = repository.launch_campaign(&campaign_id).await?;
-        assert!(!repeated_launch.newly_launched);
-        assert_eq!(repeated_launch.campaign.status, CampaignStatus::Launched);
+        assert!(matches!(
+            repository.launch_campaign(&campaign_id).await,
+            Err(Error::Validation(message)) if message == "campaign cannot be launched from launching state"
+        ));
+
+        let launched = repository.complete_campaign_launch(&campaign_id).await?;
+        assert_eq!(launched.status, CampaignStatus::Launched);
+        assert!(launched.launched_at.is_some());
+        assert!(matches!(
+            repository.complete_campaign_launch(&campaign_id).await,
+            Err(Error::Validation(message)) if message == "campaign cannot complete launch from launched state"
+        ));
+        assert!(matches!(
+            repository.launch_campaign(&campaign_id).await,
+            Err(Error::Validation(message)) if message == "campaign cannot be launched from launched state"
+        ));
 
         let unsubscribed = repository.unsubscribe(&contact.unsubscribe_token).await?;
         assert!(!unsubscribed.subscribed);

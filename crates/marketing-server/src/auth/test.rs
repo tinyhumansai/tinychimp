@@ -160,6 +160,18 @@ fn session_debug_output_redacts_the_bearer_token() {
 }
 
 #[test]
+fn token_response_debug_output_redacts_the_google_access_token() {
+    let response = TokenResponse {
+        access_token: "google-access-token".into(),
+    };
+
+    let debug = format!("{response:?}");
+
+    assert!(debug.contains("TokenResponse"));
+    assert!(!debug.contains("google-access-token"));
+}
+
+#[test]
 fn generated_state_is_valid_and_unique() -> TestResult {
     let oauth = oauth();
 

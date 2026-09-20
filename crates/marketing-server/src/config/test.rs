@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 
-use super::{Config, validate_http_url};
+use super::{Config, validate_http_url, validate_origin};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -39,10 +39,30 @@ fn loads_required_values_and_default_public_url() -> TestResult {
 
     assert_eq!(config.mongodb_database, "marketing");
     assert_eq!(config.public_base_url, "http://localhost:3000");
+    assert_eq!(config.dashboard_origin, "http://localhost:5173");
     assert_eq!(
         config.google_redirect_url,
         "https://dashboard.example.test/callback"
     );
+    Ok(())
+}
+
+#[test]
+fn accepts_a_configured_dashboard_origin_and_rejects_non_origins() -> TestResult {
+    let mut values = valid_values();
+    values.insert("DASHBOARD_ORIGIN", "https://dashboard.example.test".into());
+    let config = Config::from_lookup(|name| values.get(name).cloned())?;
+    assert_eq!(config.dashboard_origin, "https://dashboard.example.test");
+
+    for origin in [
+        "not a URL",
+        "https://dashboard.example.test/path",
+        "https://dashboard.example.test?query=true",
+        "ftp://dashboard.example.test",
+        "https://user:password@dashboard.example.test",
+    ] {
+        assert!(validate_origin("DASHBOARD_ORIGIN", origin).is_err());
+    }
     Ok(())
 }
 

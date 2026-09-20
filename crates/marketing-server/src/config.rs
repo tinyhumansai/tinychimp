@@ -16,6 +16,8 @@ pub struct Config {
     pub tinyflows_webhook_url: String,
     /// Public URL used when producing unsubscribe links.
     pub public_base_url: String,
+    /// Origin allowed to call dashboard API routes from a browser.
+    pub dashboard_origin: String,
     /// `ClickHouse` HTTP URL used for engagement analytics.
     pub clickhouse_url: String,
     /// `ClickHouse` database holding the event table.
@@ -36,6 +38,7 @@ impl fmt::Debug for Config {
             .debug_struct("Config")
             .field("mongodb_database", &self.mongodb_database)
             .field("public_base_url", &self.public_base_url)
+            .field("dashboard_origin", &self.dashboard_origin)
             .field("clickhouse_database", &self.clickhouse_database)
             .field("google_client_id", &self.google_client_id)
             .finish_non_exhaustive()
@@ -65,6 +68,8 @@ impl Config {
         };
         let public_base_url =
             lookup("PUBLIC_BASE_URL").unwrap_or_else(|| "http://localhost:3000".into());
+        let dashboard_origin =
+            lookup("DASHBOARD_ORIGIN").unwrap_or_else(|| "http://localhost:5173".into());
         if public_base_url.trim().is_empty() {
             return Err(Error::Validation(
                 "PUBLIC_BASE_URL must not be empty".into(),
@@ -72,6 +77,7 @@ impl Config {
         }
         let google_redirect_url = required("GOOGLE_REDIRECT_URL")?;
         validate_http_url("PUBLIC_BASE_URL", &public_base_url)?;
+        validate_origin("DASHBOARD_ORIGIN", &dashboard_origin)?;
         validate_http_url("GOOGLE_REDIRECT_URL", &google_redirect_url)?;
         let jwt_secret = required("JWT_SECRET")?;
         if jwt_secret.len() < 32 {
@@ -84,6 +90,7 @@ impl Config {
             mongodb_database: required("MONGODB_DATABASE")?,
             tinyflows_webhook_url: required("TINYFLOWS_WEBHOOK_URL")?,
             public_base_url,
+            dashboard_origin,
             clickhouse_url: required("CLICKHOUSE_URL")?,
             clickhouse_database: required("CLICKHOUSE_DATABASE")?,
             google_client_id: required("GOOGLE_CLIENT_ID")?,
@@ -92,6 +99,24 @@ impl Config {
             jwt_secret,
         })
     }
+}
+
+fn validate_origin(name: &str, value: &str) -> Result<()> {
+    let url = Url::parse(value)
+        .map_err(|_| Error::Validation(format!("{name} must be an absolute HTTP origin")))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host().is_none()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(Error::Validation(format!(
+            "{name} must be an absolute HTTP origin"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_http_url(name: &str, value: &str) -> Result<()> {

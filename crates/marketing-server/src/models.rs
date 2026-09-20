@@ -5,6 +5,7 @@ use mongodb::bson::oid::ObjectId;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::SerializeStruct,
 };
+use std::fmt;
 
 /// Request to create a contact.
 #[derive(Debug, Deserialize)]
@@ -16,7 +17,7 @@ pub struct CreateContact {
 }
 
 /// A marketing contact persisted in MongoDB.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Contact {
     /// MongoDB document identifier.
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
@@ -35,6 +36,20 @@ pub struct Contact {
     /// Most recent subscription preference change.
     #[serde(with = "bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for Contact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Contact")
+            .field("id", &self.id)
+            .field("email", &self.email)
+            .field("first_name", &self.first_name)
+            .field("subscribed", &self.subscribed)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Request to create a campaign draft.
@@ -238,5 +253,24 @@ mod test {
         assert_eq!(decoded.status, CampaignStatus::Launched);
         assert_eq!(decoded.launched_at, Some(timestamp));
         Ok(())
+    }
+
+    #[test]
+    fn contact_debug_output_redacts_the_unsubscribe_token() {
+        let timestamp = Utc::now();
+        let contact = Contact {
+            id: None,
+            email: "ada@example.com".into(),
+            first_name: Some("Ada".into()),
+            subscribed: true,
+            unsubscribe_token: "opaque-unsubscribe-token".into(),
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+
+        let debug = format!("{contact:?}");
+
+        assert!(debug.contains("ada@example.com"));
+        assert!(!debug.contains("opaque-unsubscribe-token"));
     }
 }

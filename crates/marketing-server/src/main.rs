@@ -13,6 +13,7 @@ struct RuntimeDependencies {
     analytics: AnalyticsWriter,
     auth: GoogleOAuth,
     public_base_url: String,
+    dashboard_origin: String,
 }
 
 /// Starts the Axum server using environment-backed infrastructure settings.
@@ -34,6 +35,7 @@ async fn serve(config: Config, listener: tokio::net::TcpListener) -> StartupResu
         dependencies.analytics,
         dependencies.auth,
         dependencies.public_base_url,
+        dependencies.dashboard_origin,
     )
     .await?;
     axum::serve(listener, router(state)).await?;
@@ -55,6 +57,7 @@ async fn runtime_dependencies(config: Config) -> StartupResult<RuntimeDependenci
             config.jwt_secret,
         ),
         public_base_url: config.public_base_url,
+        dashboard_origin: config.dashboard_origin,
     })
 }
 
@@ -85,6 +88,7 @@ mod test {
             mongodb_database: "entrypoint_contract".into(),
             tinyflows_webhook_url: "http://127.0.0.1:9/tinyflows".into(),
             public_base_url: "https://dashboard.example.test".into(),
+            dashboard_origin: "https://dashboard.example.test".into(),
             clickhouse_url: "http://127.0.0.1:9".into(),
             clickhouse_database: "analytics".into(),
             google_client_id: "client-id".into(),

@@ -21,8 +21,9 @@ use tokio::{
 use tower::ServiceExt;
 
 use super::{
-    ContactResponse, callback_state_is_valid, clear_oauth_state_cookie, cookie_value, health,
-    login_response, oauth_state_cookie, unsubscribe_page,
+    ContactResponse, callback_state_is_valid, clear_oauth_state_cookie, cookie_value,
+    has_public_origin, health, html_attribute_escape, is_unsubscribe_token, login_response,
+    oauth_state_cookie, unsubscribe_page,
 };
 use crate::{AnalyticsWriter, AppState, GoogleOAuth, TinyFlowsClient, models::Contact, router};
 
@@ -50,6 +51,31 @@ fn extracts_named_cookie_without_matching_prefixes() {
 #[test]
 fn ignores_missing_cookie_headers() {
     assert_eq!(cookie_value(&HeaderMap::new(), "oauth_state"), None);
+}
+
+#[test]
+fn requires_the_configured_public_origin_for_unsubscribe_posts() {
+    let mut headers = HeaderMap::new();
+    assert!(!has_public_origin(
+        &headers,
+        "https://dashboard.example.test"
+    ));
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://attacker.example.test"),
+    );
+    assert!(!has_public_origin(
+        &headers,
+        "https://dashboard.example.test"
+    ));
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://dashboard.example.test"),
+    );
+    assert!(has_public_origin(
+        &headers,
+        "https://dashboard.example.test"
+    ));
 }
 
 #[test]
@@ -123,16 +149,36 @@ fn login_response_redirects_to_google_and_sets_the_bound_state_cookie()
 }
 
 #[tokio::test]
-async fn health_route_is_empty_and_unsubscribe_page_is_static()
+async fn health_route_is_empty_and_unsubscribe_page_posts_a_validated_token()
 -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(health().await, StatusCode::NO_CONTENT);
-    let response = unsubscribe_page().await.into_response();
+    let response = unsubscribe_page(axum::extract::Path(
+        "0123456789abcdef0123456789abcdef".into(),
+    ))
+    .await?
+    .into_response();
     let body = to_bytes(response.into_body(), usize::MAX).await?;
     assert_eq!(
         std::str::from_utf8(&body)?,
-        "<!doctype html><title>Unsubscribe</title><main><h1>Unsubscribe from email</h1><p>Use the form in the message to stop marketing email.</p></main>"
+        "<!doctype html><title>Unsubscribe</title><main><h1>Unsubscribe from email</h1><form method=\"post\" action=\"/unsubscribe/0123456789abcdef0123456789abcdef\"><button type=\"submit\">Unsubscribe</button></form></main>"
+    );
+    assert!(
+        unsubscribe_page(axum::extract::Path("invalid".into()))
+            .await
+            .is_err()
     );
     Ok(())
+}
+
+#[test]
+fn validates_opaque_tokens_and_escapes_html_attribute_values() {
+    assert!(is_unsubscribe_token("0123456789abcdef0123456789abcdef"));
+    assert!(!is_unsubscribe_token("short"));
+    assert!(!is_unsubscribe_token("0123456789abcdef0123456789abcdeg"));
+    assert_eq!(
+        html_attribute_escape("<a href='x'>&\"</a>"),
+        "&lt;a href=&#x27;x&#x27;&gt;&amp;&quot;&lt;/a&gt;"
+    );
 }
 
 #[test]
@@ -206,9 +252,21 @@ async fn start_http_server(requests: usize) -> Result<String, Box<dyn std::error
 async fn asserts_public_routes(app: axum::Router) -> Result<(), Box<dyn std::error::Error>> {
     let health = app
         .clone()
-        .oneshot(Request::builder().uri("/health").body(Body::empty())?)
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .header(header::ORIGIN, "https://dashboard.example.test")
+                .body(Body::empty())?,
+        )
         .await?;
     assert_eq!(health.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        health
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|value| value.to_str().ok()),
+        Some("https://dashboard.example.test")
+    );
 
     let login = app
         .clone()
@@ -295,7 +353,7 @@ async fn creates_and_launches_campaign(
     let id = campaign["_id"]["$oid"]
         .as_str()
         .ok_or("campaign has Mongo extended JSON id")?;
-    for expected_status in [StatusCode::OK, StatusCode::OK] {
+    for expected_status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
         let response = app
             .clone()
             .oneshot(
@@ -330,6 +388,7 @@ async fn router_authenticates_mutations_and_drives_the_campaign_lifecycle()
         AnalyticsWriter::new(&http_url, "analytics"),
         auth(),
         "https://dashboard.example.test/".into(),
+        "https://dashboard.example.test".into(),
     )
     .await?;
     let app = router(state);
@@ -354,10 +413,23 @@ async fn router_authenticates_mutations_and_drives_the_campaign_lifecycle()
     creates_and_launches_campaign(&app, &authorization).await?;
 
     let unsubscribe_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri(format!("/unsubscribe/{token}"))
+                .header(header::ORIGIN, "https://attacker.example.test")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(unsubscribe_response.status(), StatusCode::BAD_REQUEST);
+
+    let unsubscribe_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/unsubscribe/{token}"))
+                .header(header::ORIGIN, "https://dashboard.example.test")
                 .body(Body::empty())?,
         )
         .await?;

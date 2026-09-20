@@ -57,9 +57,17 @@ impl fmt::Debug for Session {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
+}
+
+impl fmt::Debug for TokenResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenResponse")
+            .finish_non_exhaustive()
+    }
 }
 #[derive(Debug, Deserialize)]
 struct GoogleUser {
