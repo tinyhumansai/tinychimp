@@ -18,6 +18,7 @@ pub struct CampaignEvent {
     /// Associated contact identifier when available.
     pub contact_id: String,
     /// Event timestamp in UTC.
+    #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     pub occurred_at: DateTime<Utc>,
 }
 

@@ -22,7 +22,7 @@ fn campaign_event_serializes_the_clickhouse_column_names() -> Result<(), Box<dyn
             "event_name": "email_opened",
             "campaign_id": "campaign-42",
             "contact_id": "contact-7",
-            "occurred_at": "2025-02-03T04:05:06Z",
+            "occurred_at": occurred_at.timestamp_millis(),
         })
     );
     Ok(())

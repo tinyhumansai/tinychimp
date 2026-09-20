@@ -62,7 +62,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # CORS middleware allows the local Vite dashboard to call the Axum API.
 tower-http = { version = "0.6", features = ["cors"] }
 # Native ClickHouse client used for immutable engagement analytics events.
-clickhouse = "0.13"
+clickhouse = { version = "0.13", features = ["chrono"] }
 # Signed API session tokens issued after a verified Google OAuth identity.
 jsonwebtoken = "9"
 # URL encoding for Google OAuth authorization URLs.

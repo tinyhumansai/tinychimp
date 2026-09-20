@@ -9,7 +9,9 @@ use std::{
     thread,
 };
 
-use super::{Claims, GoogleOAuth, GoogleUser, StateClaims, TokenResponse, validated_access_token};
+use super::{
+    Claims, GoogleOAuth, GoogleUser, Session, StateClaims, TokenResponse, validated_access_token,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -142,6 +144,19 @@ fn debug_output_does_not_expose_secrets() {
     assert!(output.contains("client id"));
     assert!(!output.contains("jwt secret"));
     assert!(!output.contains("secret\""));
+}
+
+#[test]
+fn session_debug_output_redacts_the_bearer_token() {
+    let session = Session {
+        token: "dashboard-bearer-token".into(),
+        email: "person@example.test".into(),
+    };
+
+    let debug = format!("{session:?}");
+
+    assert!(debug.contains("person@example.test"));
+    assert!(!debug.contains("dashboard-bearer-token"));
 }
 
 #[test]

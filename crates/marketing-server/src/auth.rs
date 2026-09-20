@@ -40,12 +40,21 @@ impl fmt::Debug for GoogleOAuth {
 }
 
 /// Response returned after a successful OAuth callback.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct Session {
     /// Signed dashboard API token.
     pub token: String,
     /// Authenticated user's email.
     pub email: String,
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Session")
+            .field("email", &self.email)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Deserialize)]
