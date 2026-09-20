@@ -4,9 +4,10 @@ use std::{fmt, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::{HeaderValue, Method, StatusCode},
-    response::{Html, IntoResponse, Redirect},
+    extract::{Path, Query, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use chrono::Utc;
@@ -57,24 +58,47 @@ impl AppState {
 /// Creates the application router.
 pub fn router(state: AppState) -> Router {
     let dashboard_origin = HeaderValue::from_static("http://localhost:5173");
-    Router::new()
-        .route("/health", get(health))
+    let state = Arc::new(state);
+    let protected_api = Router::new()
         .route("/api/contacts", post(create_contact))
         .route("/api/campaigns", post(create_campaign))
         .route("/api/campaigns/{id}/launch", post(launch_campaign))
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_dashboard_session,
+        ));
+    Router::new()
+        .route("/health", get(health))
         .route("/api/auth/google", get(google_login))
         .route("/api/auth/google/callback", get(google_callback))
         .route(
             "/unsubscribe/{token}",
             get(unsubscribe_page).post(unsubscribe),
         )
+        .merge(protected_api)
         .layer(
             CorsLayer::new()
                 .allow_origin(dashboard_origin)
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers(Any),
         )
-        .with_state(Arc::new(state))
+        .with_state(state)
+}
+
+async fn require_dashboard_session(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    if token.is_none_or(|token| state.auth.validate_dashboard_token(token).is_err()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
 }
 
 async fn health() -> StatusCode {
@@ -108,33 +132,28 @@ async fn launch_campaign(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let campaign = state.repository.launch_campaign(&id).await?;
-    state
-        .workflows
-        .trigger("campaign.launched", &campaign)
-        .await?;
-    state
-        .analytics
-        .record(&CampaignEvent {
-            event_name: "campaign_launched".into(),
-            campaign_id: id,
-            contact_id: String::new(),
-            occurred_at: Utc::now(),
-        })
-        .await?;
-    Ok(Json(campaign))
+    let outcome = state.repository.launch_campaign(&id).await?;
+    if outcome.newly_launched {
+        state
+            .workflows
+            .trigger("campaign.launched", &outcome.campaign)
+            .await?;
+        state
+            .analytics
+            .record(&CampaignEvent {
+                event_name: "campaign_launched".into(),
+                campaign_id: id,
+                contact_id: String::new(),
+                occurred_at: Utc::now(),
+            })
+            .await?;
+    }
+    Ok(Json(outcome.campaign))
 }
 
-#[derive(Debug, Deserialize)]
-struct LoginQuery {
-    state: String,
-}
-
-async fn google_login(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<LoginQuery>,
-) -> Redirect {
-    Redirect::temporary(&state.auth.authorization_url(&query.state))
+async fn google_login(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse> {
+    let oauth_state = state.auth.generate_state()?;
+    login_response(&state.auth, &oauth_state)
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,12 +164,57 @@ struct CallbackQuery {
 
 async fn google_callback(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<CallbackQuery>,
-) -> Result<Json<crate::auth::Session>> {
-    if query.state.trim().is_empty() {
-        return Err(crate::Error::Validation("OAuth state is required".into()));
+) -> Result<impl IntoResponse> {
+    if !callback_state_is_valid(&state.auth, &headers, &query.state) {
+        return Err(crate::Error::Validation("OAuth state is invalid".into()));
     }
-    Ok(Json(state.auth.exchange_code(&query.code).await?))
+    let session = state.auth.exchange_code(&query.code).await?;
+    Ok((
+        [(header::SET_COOKIE, clear_oauth_state_cookie())],
+        Json(session),
+    ))
+}
+
+fn login_response(auth: &GoogleOAuth, oauth_state: &str) -> Result<Response> {
+    Ok((
+        [(header::SET_COOKIE, oauth_state_cookie(oauth_state)?)],
+        Redirect::temporary(&auth.authorization_url(oauth_state)),
+    )
+        .into_response())
+}
+
+fn oauth_state_cookie(oauth_state: &str) -> Result<HeaderValue> {
+    HeaderValue::from_str(&format!(
+        "oauth_state={oauth_state}; Path=/api/auth/google; Max-Age=600; HttpOnly; Secure; SameSite=Lax"
+    ))
+    .map_err(|error| crate::Error::Validation(error.to_string()))
+}
+
+fn clear_oauth_state_cookie() -> HeaderValue {
+    HeaderValue::from_static(
+        "oauth_state=; Path=/api/auth/google; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
+    )
+}
+
+fn callback_state_is_valid(auth: &GoogleOAuth, headers: &HeaderMap, state: &str) -> bool {
+    cookie_value(headers, "oauth_state").is_some_and(|value| value == state)
+        && auth.is_valid_state(state)
+}
+
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| {
+            part.split_once('=')
+                .filter(|(key, _)| *key == name)
+                .map(|(_, value)| value)
+        })
 }
 
 async fn unsubscribe_page() -> Html<&'static str> {
@@ -210,3 +274,6 @@ impl ContactResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod test;

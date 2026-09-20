@@ -68,3 +68,6 @@ impl fmt::Debug for AnalyticsWriter {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod test;

@@ -3,14 +3,15 @@
 use chrono::Utc;
 use mongodb::{
     Collection, Database, IndexModel,
-    bson::{doc, oid::ObjectId},
+    bson::{Bson, doc, oid::ObjectId},
     options::IndexOptions,
 };
 
 use crate::{
     error::{Error, Result},
-    models::{Campaign, CampaignStatus, Contact, CreateCampaign, CreateContact},
+    models::{Campaign, CampaignStatus, Contact, CreateCampaign, CreateContact, LaunchOutcome},
 };
+use uuid::Uuid;
 
 const UNSUBSCRIBE_PLACEHOLDER: &str = "{{unsubscribe_url}}";
 
@@ -58,36 +59,9 @@ impl MarketingRepository {
     ///
     /// Returns validation or database errors.
     pub async fn create_contact(&self, input: CreateContact) -> Result<Contact> {
-        let email = input.email.trim().to_lowercase();
-        let mut parts = email.split('@');
-        if email.chars().any(char::is_whitespace)
-            || parts.next().is_none_or(str::is_empty)
-            || parts.next().is_none_or(str::is_empty)
-            || parts.next().is_some()
-        {
-            return Err(Error::Validation("email address is invalid".into()));
-        }
-        let now = Utc::now();
-        let mut contact = Contact {
-            id: None,
-            email,
-            first_name: input.first_name.filter(|name| !name.trim().is_empty()),
-            subscribed: true,
-            unsubscribe_token: ObjectId::new().to_hex(),
-            created_at: now,
-            updated_at: now,
-        };
-        let inserted = self
-            .contacts
-            .insert_one(&contact)
-            .await?
-            .inserted_id
-            .as_object_id()
-            .ok_or_else(|| {
-                Error::Database(mongodb::error::Error::custom(
-                    "MongoDB did not return an object id",
-                ))
-            })?;
+        let mut contact = new_contact(input, Utc::now())?;
+        let insert_result = self.contacts.insert_one(&contact).await?;
+        let inserted = inserted_object_id(&insert_result.inserted_id)?;
         contact.id = Some(inserted);
         Ok(contact)
     }
@@ -98,51 +72,46 @@ impl MarketingRepository {
     ///
     /// Returns validation or database errors.
     pub async fn create_campaign(&self, input: CreateCampaign) -> Result<Campaign> {
-        if input.name.trim().is_empty() || input.subject.trim().is_empty() {
-            return Err(Error::Validation(
-                "campaign name and subject are required".into(),
-            ));
-        }
-        if !input.html_body.contains(UNSUBSCRIBE_PLACEHOLDER) {
-            return Err(Error::Validation(format!(
-                "campaign HTML must include {UNSUBSCRIBE_PLACEHOLDER}"
-            )));
-        }
-        let mut campaign = Campaign {
-            id: None,
-            name: input.name,
-            subject: input.subject,
-            html_body: input.html_body,
-            status: CampaignStatus::Draft,
-            created_at: Utc::now(),
-            launched_at: None,
-        };
-        let inserted = self
-            .campaigns
-            .insert_one(&campaign)
-            .await?
-            .inserted_id
-            .as_object_id()
-            .ok_or_else(|| {
-                Error::Database(mongodb::error::Error::custom(
-                    "MongoDB did not return an object id",
-                ))
-            })?;
+        let mut campaign = new_campaign(input, Utc::now())?;
+        let insert_result = self.campaigns.insert_one(&campaign).await?;
+        let inserted = inserted_object_id(&insert_result.inserted_id)?;
         campaign.id = Some(inserted);
         Ok(campaign)
     }
 
-    /// Marks a campaign as launched and returns it.
+    /// Marks a campaign as launched and reports whether this request changed its state.
     ///
     /// # Errors
     ///
     /// Returns not-found or database errors.
-    pub async fn launch_campaign(&self, id: &str) -> Result<Campaign> {
+    pub async fn launch_campaign(&self, id: &str) -> Result<LaunchOutcome> {
         let id = ObjectId::parse_str(id)
             .map_err(|_| Error::Validation("campaign id is invalid".into()))?;
         let now = Utc::now();
-        let campaign = self.campaigns.find_one_and_update(doc! { "_id": id }, doc! { "$set": { "status": "launching", "launched_at": mongodb::bson::DateTime::from_millis(now.timestamp_millis()) } }).return_document(mongodb::options::ReturnDocument::After).await?;
-        campaign.ok_or_else(|| Error::NotFound("campaign not found".into()))
+        if let Some(campaign) = self
+            .campaigns
+            .find_one_and_update(
+                doc! { "_id": id, "status": { "$ne": "launched" } },
+                doc! { "$set": { "status": "launched", "launched_at": mongodb::bson::DateTime::from_millis(now.timestamp_millis()) } },
+            )
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await?
+        {
+            return Ok(LaunchOutcome {
+                campaign,
+                newly_launched: true,
+            });
+        }
+
+        let campaign = self
+            .campaigns
+            .find_one(doc! { "_id": id })
+            .await?
+            .ok_or_else(|| Error::NotFound("campaign not found".into()))?;
+        Ok(LaunchOutcome {
+            campaign,
+            newly_launched: false,
+        })
     }
 
     /// Removes a contact from marketing delivery by token.
@@ -153,5 +122,294 @@ impl MarketingRepository {
     pub async fn unsubscribe(&self, token: &str) -> Result<Contact> {
         let contact = self.contacts.find_one_and_update(doc! { "unsubscribe_token": token }, doc! { "$set": { "subscribed": false, "updated_at": mongodb::bson::DateTime::from_millis(Utc::now().timestamp_millis()) } }).return_document(mongodb::options::ReturnDocument::After).await?;
         contact.ok_or_else(|| Error::NotFound("unsubscribe link is invalid".into()))
+    }
+}
+
+fn inserted_object_id(inserted_id: &Bson) -> Result<ObjectId> {
+    inserted_id.as_object_id().ok_or_else(|| {
+        Error::Database(mongodb::error::Error::custom(
+            "MongoDB did not return an object id",
+        ))
+    })
+}
+
+fn new_contact(input: CreateContact, now: chrono::DateTime<Utc>) -> Result<Contact> {
+    Ok(Contact {
+        id: None,
+        email: normalize_email(&input.email)?,
+        first_name: input.first_name.filter(|name| !name.trim().is_empty()),
+        subscribed: true,
+        unsubscribe_token: Uuid::new_v4().simple().to_string(),
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+fn normalize_email(email: &str) -> Result<String> {
+    if email.is_empty() || email.len() > 254 || email.chars().any(char::is_whitespace) {
+        return Err(Error::Validation("email address is invalid".into()));
+    }
+    let (local, domain) = email
+        .split_once('@')
+        .filter(|(_, remainder)| !remainder.contains('@'))
+        .ok_or_else(|| Error::Validation("email address is invalid".into()))?;
+    let valid_local = !local.is_empty()
+        && local.len() <= 64
+        && !local.starts_with('.')
+        && !local.ends_with('.')
+        && !local.contains("..")
+        && local
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".!#$%&'*+-/=?^_`{|}~".contains(&byte));
+    let valid_domain = domain.contains('.')
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        });
+    if !(valid_local && valid_domain) {
+        return Err(Error::Validation("email address is invalid".into()));
+    }
+    Ok(email.to_lowercase())
+}
+
+fn new_campaign(input: CreateCampaign, now: chrono::DateTime<Utc>) -> Result<Campaign> {
+    if input.name.trim().is_empty() || input.subject.trim().is_empty() {
+        return Err(Error::Validation(
+            "campaign name and subject are required".into(),
+        ));
+    }
+    if input
+        .html_body
+        .match_indices(UNSUBSCRIBE_PLACEHOLDER)
+        .count()
+        != 1
+    {
+        return Err(Error::Validation(format!(
+            "campaign HTML must include exactly one {UNSUBSCRIBE_PLACEHOLDER}"
+        )));
+    }
+    Ok(Campaign {
+        id: None,
+        name: input.name,
+        subject: input.subject,
+        html_body: input.html_body,
+        status: CampaignStatus::Draft,
+        created_at: now,
+        launched_at: None,
+    })
+}
+
+#[cfg(test)]
+mod test {
+    //! Database-free tests for repository input and state construction.
+
+    use chrono::{TimeZone, Utc};
+
+    use mongodb::{
+        Client,
+        bson::{Bson, oid::ObjectId},
+    };
+    use testcontainers::{
+        GenericImage,
+        core::{IntoContainerPort, WaitFor},
+        runners::AsyncRunner,
+    };
+
+    use super::{
+        MarketingRepository, UNSUBSCRIBE_PLACEHOLDER, inserted_object_id, new_campaign,
+        new_contact, normalize_email,
+    };
+    use crate::{
+        Error,
+        models::{CampaignStatus, CreateCampaign, CreateContact},
+    };
+
+    fn timestamp() -> Result<chrono::DateTime<Utc>, std::io::Error> {
+        Utc.with_ymd_and_hms(2026, 9, 20, 12, 34, 56)
+            .single()
+            .ok_or_else(|| std::io::Error::other("fixed test timestamp is valid"))
+    }
+
+    #[test]
+    fn normalizes_a_valid_email_address() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            normalize_email("Ada.Smith+news@Example.COM")?,
+            "ada.smith+news@example.com"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_email_addresses() {
+        for email in [
+            "",
+            " ada@example.com",
+            "ada @example.com",
+            "ada@@example.com",
+            ".ada@example.com",
+            "ada@example",
+            "ada@-example.com",
+            "ada@example..com",
+        ] {
+            assert!(
+                matches!(normalize_email(email), Err(Error::Validation(_))),
+                "{email} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn creates_contact_with_an_opaque_random_token() -> Result<(), Box<dyn std::error::Error>> {
+        let contact = new_contact(
+            CreateContact {
+                email: "ada@example.com".into(),
+                first_name: Some("  ".into()),
+            },
+            timestamp()?,
+        )?;
+
+        assert_eq!(contact.first_name, None);
+        assert_eq!(contact.unsubscribe_token.len(), 32);
+        assert!(
+            contact
+                .unsubscribe_token
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+        assert_ne!(
+            contact.unsubscribe_token,
+            new_contact(
+                CreateContact {
+                    email: "grace@example.com".into(),
+                    first_name: None
+                },
+                timestamp()?
+            )?
+            .unsubscribe_token
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn creates_a_draft_with_exactly_one_unsubscribe_placeholder()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let campaign = new_campaign(
+            CreateCampaign {
+                name: "September".into(),
+                subject: "Update".into(),
+                html_body: format!("<a href=\"{UNSUBSCRIBE_PLACEHOLDER}\">unsubscribe</a>"),
+            },
+            timestamp()?,
+        )?;
+
+        assert_eq!(campaign.status, CampaignStatus::Draft);
+        assert_eq!(campaign.created_at, timestamp()?);
+        assert_eq!(campaign.launched_at, None);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_or_repeated_unsubscribe_placeholders()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for html_body in [
+            "<p>No link</p>".into(),
+            format!("{UNSUBSCRIBE_PLACEHOLDER}{UNSUBSCRIBE_PLACEHOLDER}"),
+        ] {
+            let result = new_campaign(
+                CreateCampaign {
+                    name: "September".into(),
+                    subject: "Update".into(),
+                    html_body,
+                },
+                timestamp()?,
+            );
+            assert!(matches!(result, Err(Error::Validation(_))));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_a_non_object_id_insert_result() {
+        assert!(matches!(
+            inserted_object_id(&Bson::Null),
+            Err(Error::Database(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn persists_contacts_campaigns_and_suppression_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let container = GenericImage::new("mongo", "8.0.0")
+            .with_exposed_port(27017.tcp())
+            .with_wait_for(WaitFor::message_on_either_std("Waiting for connections"))
+            .start()
+            .await?;
+        let port = container.get_host_port_ipv4(27017.tcp()).await?;
+        let database = Client::with_uri_str(format!("mongodb://127.0.0.1:{port}"))
+            .await?
+            .database("repository_contract");
+        let repository = MarketingRepository::new(database).await?;
+
+        let contact = repository
+            .create_contact(CreateContact {
+                email: "Ada@example.com".into(),
+                first_name: Some("Ada".into()),
+            })
+            .await?;
+        assert!(contact.id.is_some());
+        assert_eq!(contact.email, "ada@example.com");
+        assert_eq!(contact.first_name.as_deref(), Some("Ada"));
+        assert!(contact.subscribed);
+
+        let duplicate = repository
+            .create_contact(CreateContact {
+                email: "ada@example.com".into(),
+                first_name: None,
+            })
+            .await;
+        assert!(matches!(duplicate, Err(Error::Database(_))));
+
+        let campaign = repository
+            .create_campaign(CreateCampaign {
+                name: "September update".into(),
+                subject: "News".into(),
+                html_body: format!("<a href=\"{UNSUBSCRIBE_PLACEHOLDER}\">Unsubscribe</a>"),
+            })
+            .await?;
+        let campaign_id = campaign.id.ok_or("campaign id is assigned")?.to_hex();
+        assert_eq!(campaign.status, CampaignStatus::Draft);
+
+        assert!(matches!(
+            repository.launch_campaign("not-an-id").await,
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            repository.launch_campaign(&ObjectId::new().to_hex()).await,
+            Err(Error::NotFound(_))
+        ));
+
+        let launched = repository.launch_campaign(&campaign_id).await?;
+        assert!(launched.newly_launched);
+        assert_eq!(launched.campaign.status, CampaignStatus::Launched);
+        assert!(launched.campaign.launched_at.is_some());
+
+        let repeated_launch = repository.launch_campaign(&campaign_id).await?;
+        assert!(!repeated_launch.newly_launched);
+        assert_eq!(repeated_launch.campaign.status, CampaignStatus::Launched);
+
+        let unsubscribed = repository.unsubscribe(&contact.unsubscribe_token).await?;
+        assert!(!unsubscribed.subscribed);
+        assert!(matches!(
+            repository.unsubscribe("unknown-token").await,
+            Err(Error::NotFound(_))
+        ));
+
+        Ok(())
     }
 }

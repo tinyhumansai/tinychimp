@@ -56,3 +56,6 @@ impl TinyFlowsClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test;

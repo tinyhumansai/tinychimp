@@ -1,6 +1,7 @@
 //! Environment-backed application configuration.
 
 use std::fmt;
+use url::Url;
 
 use crate::error::{Error, Result};
 
@@ -48,28 +49,61 @@ impl Config {
     ///
     /// Returns validation errors for missing required variables.
     pub fn from_env() -> Result<Self> {
-        fn required(name: &str) -> Result<String> {
-            let value = std::env::var(name)
-                .map_err(|_| Error::Validation(format!("missing required {name}")))?;
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let required = |name: &str| -> Result<String> {
+            let value = lookup(name)
+                .ok_or_else(|| Error::Validation(format!("missing required {name}")))?;
             if value.trim().is_empty() {
                 return Err(Error::Validation(format!(
                     "required {name} must not be empty"
                 )));
             }
             Ok(value)
+        };
+        let public_base_url =
+            lookup("PUBLIC_BASE_URL").unwrap_or_else(|| "http://localhost:3000".into());
+        if public_base_url.trim().is_empty() {
+            return Err(Error::Validation(
+                "PUBLIC_BASE_URL must not be empty".into(),
+            ));
+        }
+        let google_redirect_url = required("GOOGLE_REDIRECT_URL")?;
+        validate_http_url("PUBLIC_BASE_URL", &public_base_url)?;
+        validate_http_url("GOOGLE_REDIRECT_URL", &google_redirect_url)?;
+        let jwt_secret = required("JWT_SECRET")?;
+        if jwt_secret.len() < 32 {
+            return Err(Error::Validation(
+                "JWT_SECRET must be at least 32 bytes".into(),
+            ));
         }
         Ok(Self {
             mongodb_uri: required("MONGODB_URI")?,
             mongodb_database: required("MONGODB_DATABASE")?,
             tinyflows_webhook_url: required("TINYFLOWS_WEBHOOK_URL")?,
-            public_base_url: std::env::var("PUBLIC_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:3000".into()),
+            public_base_url,
             clickhouse_url: required("CLICKHOUSE_URL")?,
             clickhouse_database: required("CLICKHOUSE_DATABASE")?,
             google_client_id: required("GOOGLE_CLIENT_ID")?,
             google_client_secret: required("GOOGLE_CLIENT_SECRET")?,
-            google_redirect_url: required("GOOGLE_REDIRECT_URL")?,
-            jwt_secret: required("JWT_SECRET")?,
+            google_redirect_url,
+            jwt_secret,
         })
     }
 }
+
+fn validate_http_url(name: &str, value: &str) -> Result<()> {
+    let url = Url::parse(value)
+        .map_err(|_| Error::Validation(format!("{name} must be an absolute HTTP URL")))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return Err(Error::Validation(format!(
+            "{name} must be an absolute HTTP URL"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod test;

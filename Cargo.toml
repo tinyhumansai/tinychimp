@@ -67,6 +67,8 @@ clickhouse = "0.13"
 jsonwebtoken = "9"
 # URL encoding for Google OAuth authorization URLs.
 url = "2"
+# Cryptographically random opaque unsubscribe and OAuth state tokens.
+uuid = { version = "1", features = ["v4"] }
 # Module integration tests exercise the real asynchronous in-memory TinyBus.
 
 # Lints apply to every member that opts in with `[lints] workspace = true`, and
