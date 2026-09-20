@@ -60,7 +60,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # HTTP client used by the TinyFlows webhook adapter.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # CORS middleware allows the local Vite dashboard to call the Axum API.
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors"] }
 # Native ClickHouse client used for immutable engagement analytics events.
 clickhouse = { version = "0.13", features = ["chrono"] }
 # Signed API session tokens issued after a verified Google OAuth identity.
