@@ -3,17 +3,28 @@
 use chrono::{Duration, Utc};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use url::form_urlencoded;
 
 use crate::error::Result;
 
 /// Google OAuth client and JWT session issuer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GoogleOAuth {
     client_id: String,
     client_secret: String,
     redirect_url: String,
     jwt_secret: String,
+}
+
+impl fmt::Debug for GoogleOAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GoogleOAuth")
+            .field("client_id", &self.client_id)
+            .field("redirect_url", &self.redirect_url)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Response returned after a successful OAuth callback.

@@ -5,13 +5,14 @@ use std::{fmt, sync::Arc};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode},
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
 };
 use chrono::Utc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     AnalyticsWriter, GoogleOAuth, MarketingRepository, TinyFlowsClient,
@@ -55,6 +56,7 @@ impl AppState {
 
 /// Creates the application router.
 pub fn router(state: AppState) -> Router {
+    let dashboard_origin = HeaderValue::from_static("http://localhost:5173");
     Router::new()
         .route("/health", get(health))
         .route("/api/contacts", post(create_contact))
@@ -65,6 +67,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/unsubscribe/{token}",
             get(unsubscribe_page).post(unsubscribe),
+        )
+        .layer(
+            CorsLayer::new()
+                .allow_origin(dashboard_origin)
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers(Any),
         )
         .with_state(Arc::new(state))
 }
@@ -145,10 +153,10 @@ async fn google_callback(
     Ok(Json(state.auth.exchange_code(&query.code).await?))
 }
 
-async fn unsubscribe_page(Path(token): Path<String>) -> Html<String> {
-    Html(format!(
-        "<!doctype html><title>Unsubscribe</title><main><h1>Unsubscribe from email</h1><p>You can stop future marketing email with one click.</p><form method=\"post\" action=\"/unsubscribe/{token}\"><button type=\"submit\">Unsubscribe</button></form></main>"
-    ))
+async fn unsubscribe_page() -> Html<&'static str> {
+    Html(
+        "<!doctype html><title>Unsubscribe</title><main><h1>Unsubscribe from email</h1><p>Use the form in the message to stop marketing email.</p></main>",
+    )
 }
 
 async fn unsubscribe(

@@ -1,14 +1,23 @@
 //! `TinyFlows` webhook integration.
 
 use serde::Serialize;
+use std::fmt;
 
 use crate::error::Result;
 
 /// Sends marketing lifecycle events to a `TinyFlows` webhook-triggered flow.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TinyFlowsClient {
     webhook_url: String,
     http: reqwest::Client,
+}
+
+impl fmt::Debug for TinyFlowsClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TinyFlowsClient")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Serialize)]

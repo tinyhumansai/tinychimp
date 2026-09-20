@@ -1,9 +1,11 @@
 //! Environment-backed application configuration.
 
+use std::fmt;
+
 use crate::error::{Error, Result};
 
 /// Configuration required to start the API.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     /// MongoDB connection URI.
     pub mongodb_uri: String,
@@ -27,6 +29,18 @@ pub struct Config {
     pub jwt_secret: String,
 }
 
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("mongodb_database", &self.mongodb_database)
+            .field("public_base_url", &self.public_base_url)
+            .field("clickhouse_database", &self.clickhouse_database)
+            .field("google_client_id", &self.google_client_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Config {
     /// Reads configuration from environment variables.
     ///
@@ -35,7 +49,14 @@ impl Config {
     /// Returns validation errors for missing required variables.
     pub fn from_env() -> Result<Self> {
         fn required(name: &str) -> Result<String> {
-            std::env::var(name).map_err(|_| Error::Validation(format!("missing required {name}")))
+            let value = std::env::var(name)
+                .map_err(|_| Error::Validation(format!("missing required {name}")))?;
+            if value.trim().is_empty() {
+                return Err(Error::Validation(format!(
+                    "required {name} must not be empty"
+                )));
+            }
+            Ok(value)
         }
         Ok(Self {
             mongodb_uri: required("MONGODB_URI")?,

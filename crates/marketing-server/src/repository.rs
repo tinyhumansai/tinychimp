@@ -12,6 +12,8 @@ use crate::{
     models::{Campaign, CampaignStatus, Contact, CreateCampaign, CreateContact},
 };
 
+const UNSUBSCRIBE_PLACEHOLDER: &str = "{{unsubscribe_url}}";
+
 /// MongoDB repository for contacts and campaigns.
 #[derive(Clone, Debug)]
 pub struct MarketingRepository {
@@ -57,8 +59,13 @@ impl MarketingRepository {
     /// Returns validation or database errors.
     pub async fn create_contact(&self, input: CreateContact) -> Result<Contact> {
         let email = input.email.trim().to_lowercase();
-        if !email.contains('@') {
-            return Err(Error::Validation("email must contain @".into()));
+        let mut parts = email.split('@');
+        if email.chars().any(char::is_whitespace)
+            || parts.next().is_none_or(str::is_empty)
+            || parts.next().is_none_or(str::is_empty)
+            || parts.next().is_some()
+        {
+            return Err(Error::Validation("email address is invalid".into()));
         }
         let now = Utc::now();
         let mut contact = Contact {
@@ -95,6 +102,11 @@ impl MarketingRepository {
             return Err(Error::Validation(
                 "campaign name and subject are required".into(),
             ));
+        }
+        if !input.html_body.contains(UNSUBSCRIBE_PLACEHOLDER) {
+            return Err(Error::Validation(format!(
+                "campaign HTML must include {UNSUBSCRIBE_PLACEHOLDER}"
+            )));
         }
         let mut campaign = Campaign {
             id: None,
